@@ -98,10 +98,21 @@ ip link show "$STA_IF" &>/dev/null || die "STA interface $STA_IF does not exist.
 is_nm_managed() {
   local iface="${1:-$STA_IF}"
   if command -v nmcli &>/dev/null; then
-    nmcli -t -f DEVICE,MANAGED dev | grep "^$iface:" | cut -d: -f2 | grep -q "yes"
-    return $?
+    # Try different methods to check if interface is managed
+    # Method 1: Check general device status
+    if nmcli -t -f DEVICE dev | grep -q "^$iface$"; then
+        # Method 2: Check if device is currently managed by looking at connection state
+        local state=$(nmcli -t -f DEVICE,STATE dev | grep "^$iface:" | cut -d: -f2)
+        if [[ "$state" == "connected" || "$state" == "connecting" || "$state" == "disconnected" ]]; then
+            return 0  # Managed by NetworkManager
+        fi
+    fi
+    # Method 3: Check using device show (more reliable)
+    if nmcli device show "$iface" &>/dev/null; then
+        return 0
+    fi
   fi
-  return 0  # Assume managed if nmcli not available
+  return 1  # Not managed by NetworkManager
 }
 
 # ---- STA+AP capability check --------------------------------
@@ -115,10 +126,12 @@ supports_concurrency || die "Driver for $STA_IF does not report STA+AP concurren
 
 # ---- Connection Management ----------------------------------
 save_wifi_connection() {
-    CONNECTION_SSID=$(nmcli -t -f NAME,DEVICE con show --active | grep "$STA_IF" | cut -d: -f1 | head -1)
-    if [[ -n "$CONNECTION_SSID" ]]; then
-        CONNECTION_PSK=$(nmcli -s -g 802-11-wireless-security.psk connection show "$CONNECTION_SSID" 2>/dev/null || echo "")
-        info "Saved connection details for $CONNECTION_SSID"
+    if command -v nmcli &>/dev/null; then
+        CONNECTION_SSID=$(nmcli -t -f NAME,DEVICE con show --active | grep "$STA_IF" | cut -d: -f1 | head -1)
+        if [[ -n "$CONNECTION_SSID" ]]; then
+            CONNECTION_PSK=$(nmcli -s -g 802-11-wireless-security.psk connection show "$CONNECTION_SSID" 2>/dev/null || echo "")
+            info "Saved connection details for $CONNECTION_SSID"
+        fi
     fi
 }
 
@@ -173,14 +186,14 @@ cleanup() {
     iptables -D FORWARD -i "$AP_IF" -o "$STA_IF" -j ACCEPT 2>/dev/null || true
     
     # Remove virtual interface if we created it
-    if ip link show "$AP_IF" &>/dev/null && ! is_nm_managed "$AP_IF"; then
+    if ip link show "$AP_IF" &>/dev/null; then
         run iw dev "$AP_IF" del 2>/dev/null || true
     fi
     
     # Restore NetworkManager if we disabled it
     if [[ "$NM_MANAGED" == "true" ]]; then
         info "Restoring NetworkManager management for $STA_IF"
-        run nmcli device set "$STA_IF" managed yes
+        run nmcli device set "$STA_IF" managed yes 2>/dev/null || true
         run nmcli device connect "$STA_IF" 2>/dev/null || true
     fi
     
@@ -193,6 +206,19 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
+# ---- Check for existing processes using the interface ----
+info "Checking for existing processes using $STA_IF"
+run pkill -f "hostapd.*$STA_IF" 2>/dev/null || true
+run pkill -f "wpa_supplicant.*$STA_IF" 2>/dev/null || true
+
+# Remove any existing virtual interfaces that might conflict
+for iface in $(iw dev | awk '/Interface/{print $2}' | grep -E '^(ap|hotspot)[0-9]*$'); do
+    warn "Removing existing virtual interface: $iface"
+    run iw dev "$iface" del 2>/dev/null || true
+done
+
+sleep 1
+
 # ---- Main Execution -----------------------------------------
 
 # Check if NetworkManager is managing the interface
@@ -200,7 +226,7 @@ if is_nm_managed "$STA_IF"; then
     info "NetworkManager is managing $STA_IF - preparing for hotspot"
     save_wifi_connection
     info "Temporarily disabling NetworkManager management"
-    run nmcli device set "$STA_IF" managed no
+    run nmcli device set "$STA_IF" managed no 2>/dev/null || warn "Could not disable NetworkManager management"
     NM_MANAGED=true
     setup_manual_connection
 else
