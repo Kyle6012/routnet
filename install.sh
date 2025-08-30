@@ -18,22 +18,25 @@ error() { echo "[ERROR] $*" >&2; }
 
 [[ $EUID -eq 0 ]] || { error "Run with sudo."; exit 1; }
 
+# Set default values
+pkgman=""
+pkg_update=""
+COMMON_DEPS=(iw hostapd dnsmasq iptables iproute2 haveged)
+BUILD_DEPS=(git make)
+DISTRO_SUPPORTED=true
+
 # detect distro and set package manager
 detect_distro() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         case "$ID" in
-            arch|manjaro|endeavouros|garuda|athena|exodia)
+            arch|manjaro|endeavouros|garuda|athenaos|exodia)
                 pkgman="pacman -S --needed --noconfirm"
                 pkg_update="pacman -Sy"
-                COMMON_DEPS=(iw hostapd dnsmasq iptables iproute2 haveged)
-                BUILD_DEPS=(git make)
                 ;;
             ubuntu|debian|linuxmint|pop|zorin|elementary|kali|parrot)
                 pkgman="apt install -y"
                 pkg_update="apt update"
-                COMMON_DEPS=(iw hostapd dnsmasq iptables iproute2 haveged)
-                BUILD_DEPS=(git make)
                 ;;
             fedora|rhel|centos|almalinux|rocky|ol)
                 # Use dnf if available, fallback to yum
@@ -44,71 +47,81 @@ detect_distro() {
                     pkgman="yum install -y"
                     pkg_update="yum update -y"
                 fi
+                # Use iproute instead of iproute2 for RedHat family
                 COMMON_DEPS=(iw hostapd dnsmasq iptables iproute haveged)
-                BUILD_DEPS=(git make)
                 ;;
             opensuse*|suse|sled|leap)
                 pkgman="zypper install -y"
                 pkg_update="zypper refresh"
-                COMMON_DEPS=(iw hostapd dnsmasq iptables iproute2 haveged)
-                BUILD_DEPS=(git make)
                 ;;
             *)
-                error "Unsupported distro: $ID"
+                warn "Unsupported or unknown distro: $ID"
+                warn "Cannot automatically install dependencies"
                 warn "Please install these packages manually:"
                 warn "Required: iw hostapd dnsmasq iptables iproute2"
                 warn "Optional: haveged (for entropy), git, make"
-                exit 1
+                DISTRO_SUPPORTED=false
                 ;;
         esac
     else
-        error "Cannot detect distribution - /etc/os-release not found"
-        exit 1
+        warn "Cannot detect distribution - /etc/os-release not found"
+        warn "Please install these packages manually:"
+        warn "Required: iw hostapd dnsmasq iptables iproute2"
+        warn "Optional: haveged (for entropy), git, make"
+        DISTRO_SUPPORTED=false
     fi
 }
 
 detect_distro
 
-info "Detected OS: $NAME ($ID)"
+if [[ -n "$NAME" ]]; then
+    info "Detected OS: $NAME ($ID)"
+else
+    info "OS detection: Unknown"
+fi
 
-# Update package database
-info "Updating package database..."
-eval "$pkg_update" || warn "Package update failed, continuing anyway..."
+# Only attempt package management for supported distros
+if [[ "$DISTRO_SUPPORTED" == true ]]; then
+    # Update package database
+    info "Updating package database..."
+    eval "$pkg_update" || warn "Package update failed, continuing anyway..."
 
-# Install common dependencies
-info "Installing dependencies..."
-for pkg in "${COMMON_DEPS[@]}"; do
-    if ! eval "$pkgman $pkg" 2>/dev/null; then
-        warn "Package $pkg not available, skipping..."
-    fi
-done
-
-# Install build dependencies only if create_ap needs to be built
-if ! command -v create_ap &>/dev/null; then
-    info "Installing build dependencies for create_ap..."
-    for pkg in "${BUILD_DEPS[@]}"; do
-        eval "$pkgman $pkg" 2>/dev/null || warn "Build dependency $pkg not available"
+    # Install common dependencies
+    info "Installing dependencies..."
+    for pkg in "${COMMON_DEPS[@]}"; do
+        if ! eval "$pkgman $pkg" 2>/dev/null; then
+            warn "Package $pkg not available, skipping..."
+        fi
     done
+
+    # Install build dependencies only if create_ap needs to be built
+    if ! command -v create_ap &>/dev/null; then
+        info "Installing build dependencies for create_ap..."
+        for pkg in "${BUILD_DEPS[@]}"; do
+            eval "$pkgman $pkg" 2>/dev/null || warn "Build dependency $pkg not available"
+        done
+    fi
+else
+    warn "Skipping automatic dependency installation for unsupported distro"
+    warn "Please ensure required packages are installed manually before using routnet"
 fi
 
 # install create_ap from GitHub if missing
 if ! command -v create_ap &>/dev/null; then
     info "Installing create_ap from github"
     tmp=$(mktemp -d)
-    git clone --depth 1 https://github.com/oblique/create_ap.git "$tmp/create_ap" || {
-        error "Failed to clone create_ap repository"
-        rm -rf "$tmp"
-        exit 2
-    }
-    pushd "$tmp/create_ap" >/dev/null
-    make install PREFIX=/usr/local || {
-        error "Failed to build create_ap"
+    if git clone --depth 1 https://github.com/oblique/create_ap.git "$tmp/create_ap"; then
+        pushd "$tmp/create_ap" >/dev/null
+        if make install PREFIX=/usr/local; then
+            info "create_ap installed successfully"
+        else
+            error "Failed to build create_ap"
+        fi
         popd >/dev/null
-        rm -rf "$tmp"
-        exit 3
-    }
-    popd >/dev/null
-    rm -rf "$tmp"
+    else
+        error "Failed to clone create_ap repository"
+    fi
+    rm -rf "$tmp" 2>/dev/null || true
 fi
 
 # fetch and install routnet binary with verification
