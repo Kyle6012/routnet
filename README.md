@@ -1,106 +1,110 @@
+# Routnet 🕶️⚡
 
-# routnet – STA+AP Wi-Fi sharing utility for Linux
+Routnet is a simple, self-contained tool that lets you **turn your Linux machine into a Wi-Fi hotspot**, using the **same Wi-Fi adapter** for both internet and hotspot. Think of it as the Linux version of the **Windows Mobile Hotspot** feature — but more flexible and hackable.
 
-## Purpose
-Provide a command-line equivalent to Windows’ WLAN Hosted Network feature by
-1. maintaining an existing station-mode (STA) connection,
-2. spawning a concurrent virtual interface in AP mode,
-3. provisioning DHCP/DNS via dnsmasq,
-4. applying IPv4 NAT so downstream clients reach the upstream network.
+As long as your Wi-Fi card supports running in AP mode while staying connected, Routnet will do the job. It’s designed to run smoothly on **all major Linux distros** (Ubuntu, Debian, Fedora, Arch, etc.), and avoids hard-coding names like `wlan0` by detecting the interface automatically or letting you choose.
 
 ---
 
-## Requirements
-- Linux ≥ 4.x kernel  
-- driver and firmware exposing **managed + AP** in `iw phy <phy> info | grep "valid interface combinations"`  
-- utilities: `iw`, `iproute2`, `hostapd`, `dnsmasq`, `iptables`, `sysctl`  
-- root privileges (CAP_NET_ADMIN + CAP_NET_RAW)
+## ✨ What It Can Do
+
+* Share your internet connection through a Wi-Fi hotspot, just like Windows.
+* Works with **any wireless interface** (auto-detects or you can specify with `--iface`).
+* Lets you set your own **IP, subnet, and DNS**, or just use the defaults.
+* Comes with an optional **systemd service** if you want it to auto-start on boot.
+* Fully self-contained.
 
 ---
 
-## Installation
+## 🚀 Install It
+
+1. Clone the repo and run the installer:
 
 ```bash
-wget https://raw.githubusercontent.com/Kyle6012/routnet/main/install.sh
-sudo bash install.sh      # resolves distro packages or builds create_ap
+git clone https://github.com/Kyle6012/routnet.git
+cd routnet
+./install.sh
 ```
-
----
-
-## CLI synopsis
-```text
-routnet [options]
-
-  -a <iface>      virtual AP interface name        (default: ap0)
-  -s <iface>      STA interface with internet      (auto-detected)
-  -S <ssid>       SSID broadcast by AP             (default: ROUTNET)
-  -P <pass>       WPA2-PSK passphrase              (open if omitted)
-  --driver <drv>  hostapd driver                   (default: nl80211)
-  --dry-run       print commands, do not execute
-  -h, --help      show help
-```
-
----
-
-## Typical usage
+2. Automatically install:
 ```bash
-# minimal
-sudo routnet
+wget -qO- https://raw.githubusercontent.com/Kyle6012/routnet/main/install.sh | sudo bash
+```
 
-# explicit
-sudo routnet -a ap0 -s wlp2s0 -S CorpGuest -P 'Sup3r$ecret'
+The installer:
+
+* Installs needed tools (`hostapd`, `dnsmasq`, `iw`, `iproute2`, etc.)
+* Copies `routnet.sh` to `/usr/local/bin/routnet`
+* Optionally sets up `routnet.service` so you can run it like any other system service.
+---
+
+## ⚡ How to Use
+
+### Quick Example
+
+```bash
+sudo routnet --iface wlan0 --ssid MyHotspot --password secret123
+```
+
+### Options You Can Use
+
+| Argument     | What It Does                                     | Default            |
+| ------------ | ------------------------------------------------ | ------------------ |
+| `--iface`    | Which Wi-Fi interface to use (auto if not given) | auto-detect        |
+| `--ssid`     | Name of your hotspot                             | `Routnet_AP`       |
+| `--password` | WPA2 password (min 8 chars)                      | `changeme123`      |
+| `--ip`       | IP address for the AP                            | `192.168.50.1`     |
+| `--subnet`   | Subnet mask                                      | `255.255.255.0`    |
+| `--dns`      | DNS servers to hand out                          | `8.8.8.8, 1.1.1.1` |
+
+---
+
+## 🛠️ Run as a Service (Optional)
+
+If you want Routnet to behave like a background service:
+
+```bash
+sudo systemctl enable routnet
+sudo systemctl start routnet
+```
+
+Stop it any time:
+
+```bash
+sudo systemctl stop routnet
+```
+
+See live logs:
+
+```bash
+journalctl -u routnet -f
 ```
 
 ---
 
-## Internal workflow
+## 🖥️ How It Works
 
-1. **STA detection**: `nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="wifi" && $3=="connected"{print $1}'`  
-   fallback: `iw dev <if> link | grep -q 'SSID:'`.
+1. Picks the right Wi-Fi interface (or uses the one you pass in).
+2. Switches the card into **AP mode** without killing your internet.
+3. Assigns an IP, enables NAT, and configures DNS with `dnsmasq`.
+4. Fires up `hostapd` to start broadcasting your hotspot.
+5. Routes internet traffic from your main connection to the hotspot clients.
 
-2. **Interface creation**:  
-   `iw dev <STA> interface add <AP> type __ap`.
-
-3. **Bring-up**:  
-   `ip link set <STA> up && ip link set <AP> up`.
-
-4. **Preferred backend**: if `create_ap` is in `$PATH`, exec  
-   `create_ap --driver <drv> <AP> <STA> <SSID> [passphrase]`.
-
-5. **Fallback stack**:
-   - `hostapd -B <temp_conf>`  
-   - `dnsmasq -C <temp_conf> --dhcp-range=192.168.50.10,192.168.50.100,255.255.255.0,12h`  
-   - `sysctl net.ipv4.ip_forward=1`  
-   - `iptables -t nat -A POSTROUTING -o <STA> -j MASQUERADE`  
-   - `iptables -A FORWARD -i <STA> -o <AP> -m state --state RELATED,ESTABLISHED -j ACCEPT`  
-   - `iptables -A FORWARD -i <AP> -o <STA> -j ACCEPT`.
+It’s basically the same thing Windows does under the hood when you toggle “Mobile Hotspot” — just open source and customizable.
 
 ---
 
-## Exit codes
-| code | meaning |
-|------|---------|
-| 1    | not running as root |
-| 2    | unknown CLI argument |
-| 3    | no STA interface detected |
-| 4    | specified STA does not exist |
-| 5    | driver lacks STA+AP concurrency |
+## 📦 Remove It
+
+```bash
+sudo systemctl stop routnet
+sudo systemctl disable routnet
+sudo rm /usr/local/bin/routnet
+sudo rm /etc/systemd/system/routnet.service
+```
 
 ---
 
-## File locations
-- CLI executable: `/usr/local/bin/routnet`  
-- temporary configs: `/tmp/routnet_{hostapd,dnsmasq}.conf`  
-- logs: stdout/stderr of `hostapd` / `dnsmasq`
+## 👤 Author
 
----
-
-## Cleanup
-Ctrl-C terminates the foreground process; the script removes the virtual interface and flushes iptables rules it added.
-
----
-## Author
-- Meshack Bahati Ouma
-
-## License
-MIT [LICENSE](LICENSE)
+**Meshack Bahati Ouma**
+Built with ❤️  for Linux users.
