@@ -22,7 +22,6 @@ error() { echo "[ERROR] $*" >&2; }
 pkgman=""
 pkg_update=""
 COMMON_DEPS=(iw hostapd dnsmasq iptables iproute2 haveged)
-BUILD_DEPS=(git make)
 DISTRO_SUPPORTED=true
 
 # detect distro and set package manager
@@ -39,7 +38,6 @@ detect_distro() {
                 pkg_update="apt update"
                 ;;
             fedora|rhel|centos|almalinux|rocky|ol)
-                # Use dnf if available, fallback to yum
                 if command -v dnf &>/dev/null; then
                     pkgman="dnf install -y"
                     pkg_update="dnf update -y"
@@ -47,7 +45,6 @@ detect_distro() {
                     pkgman="yum install -y"
                     pkg_update="yum update -y"
                 fi
-                # Use iproute instead of iproute2 for RedHat family
                 COMMON_DEPS=(iw hostapd dnsmasq iptables iproute haveged)
                 ;;
             opensuse*|suse|sled|leap)
@@ -59,7 +56,7 @@ detect_distro() {
                 warn "Cannot automatically install dependencies"
                 warn "Please install these packages manually:"
                 warn "Required: iw hostapd dnsmasq iptables iproute2"
-                warn "Optional: haveged (for entropy), git, make"
+                warn "Optional: haveged (for entropy)"
                 DISTRO_SUPPORTED=false
                 ;;
         esac
@@ -67,61 +64,31 @@ detect_distro() {
         warn "Cannot detect distribution - /etc/os-release not found"
         warn "Please install these packages manually:"
         warn "Required: iw hostapd dnsmasq iptables iproute2"
-        warn "Optional: haveged (for entropy), git, make"
+        warn "Optional: haveged (for entropy)"
         DISTRO_SUPPORTED=false
     fi
 }
 
 detect_distro
 
-if [[ -n "$NAME" ]]; then
+if [[ -n "${NAME:-}" ]]; then
     info "Detected OS: $NAME ($ID)"
 else
     info "OS detection: Unknown"
 fi
 
-# Only attempt package management for supported distros
 if [[ "$DISTRO_SUPPORTED" == true ]]; then
-    # Update package database
     info "Updating package database..."
     eval "$pkg_update" || warn "Package update failed, continuing anyway..."
 
-    # Install common dependencies
     info "Installing dependencies..."
     for pkg in "${COMMON_DEPS[@]}"; do
         if ! eval "$pkgman $pkg" 2>/dev/null; then
             warn "Package $pkg not available, skipping..."
         fi
     done
-
-    # Install build dependencies only if create_ap needs to be built
-    if ! command -v create_ap &>/dev/null; then
-        info "Installing build dependencies for create_ap..."
-        for pkg in "${BUILD_DEPS[@]}"; do
-            eval "$pkgman $pkg" 2>/dev/null || warn "Build dependency $pkg not available"
-        done
-    fi
 else
     warn "Skipping automatic dependency installation for unsupported distro"
-    warn "Please ensure required packages are installed manually before using routnet"
-fi
-
-# install create_ap from GitHub if missing
-if ! command -v create_ap &>/dev/null; then
-    info "Installing create_ap from github"
-    tmp=$(mktemp -d)
-    if git clone --depth 1 https://github.com/oblique/create_ap.git "$tmp/create_ap"; then
-        pushd "$tmp/create_ap" >/dev/null
-        if make install PREFIX=/usr/local; then
-            info "create_ap installed successfully"
-        else
-            error "Failed to build create_ap"
-        fi
-        popd >/dev/null
-    else
-        error "Failed to clone create_ap repository"
-    fi
-    rm -rf "$tmp" 2>/dev/null || true
 fi
 
 # fetch and install routnet binary with verification
@@ -141,6 +108,27 @@ fi
 
 chmod +x "$TARGET"
 info "routnet installed to $TARGET"
+
+# Create systemd service if not present
+SERVICE_FILE="/etc/systemd/system/routnet.service"
+if [ ! -f "$SERVICE_FILE" ]; then
+    info "Creating routnet.service..."
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=RoutNet Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/routnet
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reexec
+    systemctl enable routnet.service
+fi
 
 # Verify installation
 if command -v routnet &>/dev/null; then
